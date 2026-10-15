@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Build one or more npm TL package recipes. Each argument is a package directory
+# under the repo root (e.g. packages/esbuild/0.28.0). Invoked from Tekton with
+# args expanded from the PACKAGES array param.
+set -euo pipefail
+
+usage() {
+    cat <<'EOF'
+Usage: build-npm-packages <pkg-dir> [<pkg-dir> ...]
+
+Build onboarder recipes via build-npm-package. At least one package directory is
+required. Writes package dirs, one per line, to BUILT_LIST (under WORKDIR_ROOT,
+default /var/workdir/built/list.txt).
+
+Environment:
+  WORKDIR_ROOT   Factory scratch root (Tekton: /var/workdir)
+  SOURCE_ROOT    Onboarding repo checkout (default: ${WORKDIR_ROOT}/source)
+  WORK_ROOT      Writable build scratch (default: ${WORKDIR_ROOT}/work)
+  OUTPUT_ROOT    Factory tarball output (default: ${WORKDIR_ROOT}/output)
+EOF
+}
+
+# shellcheck source=npm-workdir-load.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/npm-workdir-load.sh"
+
+mkdir -p "$(dirname "${BUILT_LIST}")" "${WORK_ROOT}" "${OUTPUT_ROOT}"
+: > "${BUILT_LIST}"
+
+if [[ $# -lt 1 ]]; then
+    echo "[build-npm-packages] ERROR: no packages to build" >&2
+    usage >&2
+    exit 1
+fi
+
+for pkg in "$@"; do
+    manifest="${SOURCE_ROOT}/${pkg}/manifest.json"
+    if [[ ! -f "${manifest}" ]]; then
+        echo "Missing manifest: ${manifest}" >&2
+        exit 1
+    fi
+    echo "[build-npm-packages] ${pkg}"
+    WORK_DIR="${WORK_ROOT}/${pkg}" \
+    OUT_DIR="${OUTPUT_ROOT}/${pkg}" \
+    PACKAGE_DIR="${SOURCE_ROOT}/${pkg}" \
+    MANIFEST_PATH="${manifest}" \
+    build-npm-package --manifest "${manifest}"
+    echo "${pkg}" >> "${BUILT_LIST}"
+done
+
+echo "[build-npm-packages] Done"

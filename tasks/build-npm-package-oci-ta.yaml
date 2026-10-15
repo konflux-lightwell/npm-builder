@@ -1,0 +1,273 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: build-npm-package-oci-ta
+  annotations:
+    tekton.dev/pipelines.minVersion: 0.12.1
+    tekton.dev/tags: npm, konflux, trusted-libraries
+  labels:
+    app.kubernetes.io/version: "0.1"
+    # Conforma pipeline-required-tasks selector (see policy-data/).
+    build.appstudio.redhat.com/build_type: build-npm
+
+spec:
+  description: >-
+    Build npm Trusted Libraries packages from onboarding recipes, generate an
+    SPDX SBOM (Syft → redhat.spdx.json), and push an OCI artifact to Quay
+    (mirrors build-python-wheels: SBOM at build; attestations at release).
+    Optional Pulp Stage when PUBLISH_TO_PULP=true.
+  params:
+    - name: PACKAGES
+      description: >-
+        Package directories to build, e.g. ["packages/esbuild/0.28.0"]
+      type: array
+    - name: SOURCE_ARTIFACT
+      description: Trusted Artifact URI with the onboarding repo checkout
+      type: string
+    - name: BUILDER_IMAGE
+      description: Pinned npm-builder image reference
+      type: string
+    - name: IMAGE
+      description: Reference of the npm packages OCI artifact to produce
+      type: string
+    - name: IMAGE_EXPIRES_AFTER
+      description: >-
+        Delete image tag after specified time. Empty means keep the tag.
+        Examples: 1h, 2d, 5d, 3w.
+      type: string
+      default: ""
+    - name: PULP_NPM_REGISTRY_URL
+      description: Pulp npm registry URL for stage publish
+      type: string
+      default: ""
+    - name: NPM_PUBLISH_SECRET_NAME
+      description: K8s secret with npm publish credentials (username/password or npmrc)
+      type: string
+      default: rhtl-pulp-npm-stage-credentials
+    - name: PUBLISH_TO_PULP
+      description: When true, npm publish to Pulp Stage (requires stage secret)
+      type: string
+      default: "false"
+    - name: WORKDIR_ROOT
+      description: >-
+        Writable emptyDir mount for factory scratch (source checkout, build output, OCI staging)
+      type: string
+      default: /var/workdir
+    - name: caTrustConfigMapKey
+      type: string
+      default: ca-bundle.crt
+    - name: caTrustConfigMapName
+      type: string
+      default: trusted-ca
+  results:
+    - name: PACKAGES_BUILT
+      description: Comma-separated list of package directories built
+    - name: IMAGE_DIGEST
+      description: Digest of the OCI artifact just pushed
+    - name: IMAGE_URL
+      description: OCI artifact repository and tag
+    - name: IMAGE_REF
+      description: OCI artifact reference (image@digest)
+  volumes:
+    - name: trusted-ca
+      configMap:
+        items:
+          - key: $(params.caTrustConfigMapKey)
+            path: ca-bundle.crt
+        name: $(params.caTrustConfigMapName)
+        optional: true
+    - name: workdir
+      emptyDir: {}
+  stepTemplate:
+    env:
+      - name: WORKDIR_ROOT
+        value: $(params.WORKDIR_ROOT)
+    volumeMounts:
+      - mountPath: $(params.WORKDIR_ROOT)
+        name: workdir
+  steps:
+    - name: use-trusted-artifact
+      image: quay.io/konflux-ci/build-trusted-artifacts:latest@sha256:2712c8a6453fc9db5fc4c2d9d952554a4eea46d2fdba47a272b79fa07f8c8c40
+      args:
+        - use
+        - $(params.SOURCE_ARTIFACT)=$(params.WORKDIR_ROOT)/source
+      volumeMounts:
+        - mountPath: /etc/pki/tls/certs/ca-custom-bundle.crt
+          name: trusted-ca
+          readOnly: true
+          subPath: ca-bundle.crt
+    - name: build-packages
+      image: $(params.BUILDER_IMAGE)
+      workingDir: $(params.WORKDIR_ROOT)/source
+      command:
+        - build-npm-packages
+      args:
+        - $(params.PACKAGES[*])
+      computeResources:
+        limits:
+          cpu: "4"
+          memory: 8Gi
+        requests:
+          cpu: "2"
+          memory: 4Gi
+    - name: collect-artifacts
+      image: $(params.BUILDER_IMAGE)
+      command:
+        - collect-npm-package-outputs
+      computeResources:
+        limits:
+          memory: 2Gi
+        requests:
+          cpu: "1"
+          memory: 512Mi
+    - name: generate-sbom
+      image: $(params.BUILDER_IMAGE)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        ARTIFACT_ROOT="${ARTIFACT_ROOT:-${WORKDIR_ROOT}/artifact}"
+        # Embed SPDX (Syft → package/sboms/redhat.spdx.json) into every collected .tgz.
+        generate-npm-sbom "${ARTIFACT_ROOT}"
+      computeResources:
+        limits:
+          memory: 1Gi
+        requests:
+          cpu: "250m"
+          memory: 256Mi
+    - name: create-oci-artifact
+      image: quay.io/konflux-ci/oras:latest@sha256:1beeecce012c99794568f74265c065839f9703d28306a8430b667f639343a98b
+      workingDir: $(params.WORKDIR_ROOT)
+      volumeMounts:
+        - mountPath: /etc/pki/tls/certs/ca-custom-bundle.crt
+          name: trusted-ca
+          readOnly: true
+          subPath: ca-bundle.crt
+      env:
+        - name: IMAGE
+          value: $(params.IMAGE)
+        - name: IMAGE_EXPIRES_AFTER
+          value: $(params.IMAGE_EXPIRES_AFTER)
+      script: |
+        #!/bin/bash
+        set -euo pipefail
+
+        echo "[$(date --utc -Ins)] Pushing npm packages OCI artifact"
+
+        select-oci-auth "$IMAGE" > auth.json
+        AUTHFILE="$(realpath auth.json)"
+
+        EXPIRE_LABEL=()
+        [ -n "$IMAGE_EXPIRES_AFTER" ] && EXPIRE_LABEL=("--annotation" "quay.expires-after=$IMAGE_EXPIRES_AFTER")
+
+        ARTIFACT_ROOT="${ARTIFACT_ROOT:-${WORKDIR_ROOT}/artifact}"
+        # Stage push contents in a dir the oras image user can write (ARTIFACT_ROOT
+        # is owned by the builder image user from collect-artifacts).
+        PUSH_DIR="$(mktemp -d)"
+        if [[ -d "${ARTIFACT_ROOT}" ]]; then
+          # Copy any collected artifacts; empty dir leaves PUSH_DIR empty.
+          cp -a "${ARTIFACT_ROOT}/." "${PUSH_DIR}/" 2>/dev/null || true
+        fi
+        cd "${PUSH_DIR}"
+
+        shopt -s nullglob dotglob
+        artifact_files=(*)
+        if [[ ${#artifact_files[@]} -eq 0 ]]; then
+          echo "No npm artifacts to push under ${PUSH_DIR}" >&2
+          exit 1
+        fi
+        # Require at least one package tarball (oras image has no find(1)).
+        shopt -s nullglob globstar
+        tgz_found=(*.tgz **/*.tgz)
+        if [[ ${#tgz_found[@]} -eq 0 ]]; then
+          echo "No .tgz packages to push (refusing empty / placeholder OCI)" >&2
+          ls -la >&2 || true
+          exit 1
+        fi
+        shopt -u nullglob globstar dotglob
+
+        echo "Pushing OCI artifact to ${IMAGE}"
+        if ! retry oras push "$IMAGE" \
+          --registry-config "${AUTHFILE}" \
+          "${EXPIRE_LABEL[@]}" \
+          --artifact-type "application/vnd.npm.packages" \
+          "${artifact_files[@]}"
+        then
+          echo "Failed to push OCI artifact ${IMAGE} to registry"
+          exit 1
+        fi
+
+        if ! RESULTING_DIGEST=$(retry oras resolve \
+          --registry-config "${AUTHFILE}" "${IMAGE}")
+        then
+          echo "Failed to get digest for ${IMAGE} from registry"
+          exit 1
+        fi
+
+        echo -n "$IMAGE" | tee "$(results.IMAGE_URL.path)"
+        echo -n "$RESULTING_DIGEST" | tee "$(results.IMAGE_DIGEST.path)"
+        echo -n "${IMAGE}@${RESULTING_DIGEST}" | tee "$(results.IMAGE_REF.path)"
+
+        echo "[$(date --utc -Ins)] End create-oci-artifact"
+      computeResources:
+        limits:
+          memory: 1Gi
+        requests:
+          cpu: "1"
+          memory: 1Gi
+    - name: publish-pulp-stage
+      image: $(params.BUILDER_IMAGE)
+      env:
+        - name: PULP_NPM_REGISTRY_URL
+          value: $(params.PULP_NPM_REGISTRY_URL)
+        - name: PUBLISH_TO_PULP
+          value: $(params.PUBLISH_TO_PULP)
+        - name: NPM_PUBLISH_NPMRC
+          valueFrom:
+            secretKeyRef:
+              name: $(params.NPM_PUBLISH_SECRET_NAME)
+              key: npmrc
+              optional: true
+        - name: NPM_PUBLISH_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: $(params.NPM_PUBLISH_SECRET_NAME)
+              key: username
+              optional: true
+        - name: NPM_PUBLISH_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: $(params.NPM_PUBLISH_SECRET_NAME)
+              key: password
+              optional: true
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        if [[ "${PUBLISH_TO_PULP}" != "true" ]]; then
+          echo "[publish-pulp-stage] skipped (PUBLISH_TO_PULP=${PUBLISH_TO_PULP})"
+          exit 0
+        fi
+        if [[ -z "${PULP_NPM_REGISTRY_URL}" ]]; then
+          echo "PULP_NPM_REGISTRY_URL is required when PUBLISH_TO_PULP=true" >&2
+          exit 1
+        fi
+        ARTIFACT_ROOT="${ARTIFACT_ROOT:-${WORKDIR_ROOT}/artifact}"
+        npm-publish-pulp "${ARTIFACT_ROOT}"
+      computeResources:
+        limits:
+          memory: 1Gi
+        requests:
+          cpu: "500m"
+          memory: 512Mi
+    - name: record-results
+      image: $(params.BUILDER_IMAGE)
+      script: |
+        #!/usr/bin/env bash
+        set -euo pipefail
+        record-npm-packages-built | tee "$(results.PACKAGES_BUILT.path)"
+      computeResources:
+        limits:
+          memory: 256Mi
+        requests:
+          cpu: "100m"
+          memory: 128Mi

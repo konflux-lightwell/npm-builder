@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Embed an SPDX SBOM into each collected npm package tarball using Syft.
+# Parity with Python wheels: package/sboms/redhat.spdx.json (Fromager → redhat.spdx.json).
+#
+# Long-term tool: Syft (Anchore) — SPDX-JSON output, works for main + platform
+# packages, no lockfile required, common in Konflux/RHTAS pipelines.
+#
+# Usage: generate-npm-sbom [artifact-dir]
+# Default: ARTIFACT_ROOT (or ./artifact)
+set -euo pipefail
+
+ARTIFACT_DIR="${1:-${ARTIFACT_ROOT:-./artifact}}"
+SBOM_REL="sboms/redhat.spdx.json"
+
+# Avoid Syft calling out for update checks during factory builds.
+export SYFT_CHECK_FOR_APP_UPDATE="${SYFT_CHECK_FOR_APP_UPDATE:-false}"
+
+if [[ ! -d "${ARTIFACT_DIR}" ]]; then
+    echo "[generate-npm-sbom] missing artifact dir: ${ARTIFACT_DIR}" >&2
+    exit 1
+fi
+
+if ! command -v syft >/dev/null 2>&1; then
+    echo "[generate-npm-sbom] ERROR: syft not found on PATH (expected in npm-builder image)" >&2
+    exit 1
+fi
+
+tgz_files=()
+while IFS= read -r f; do
+    [[ -n "${f}" ]] && tgz_files+=("$f")
+done < <(find "${ARTIFACT_DIR}" -type f -name '*.tgz' | LC_ALL=C sort)
+
+if [[ ${#tgz_files[@]} -eq 0 ]]; then
+    echo "[generate-npm-sbom] no .tgz files — nothing to embed"
+    exit 0
+fi
+
+tmpdir="$(mktemp -d)"
+trap 'rm -rf "${tmpdir}"' EXIT
+
+embedded=0
+for tgz in "${tgz_files[@]}"; do
+    [[ -f "${tgz}" ]] || continue
+
+    rel="${tgz#${ARTIFACT_DIR}/}"
+    rel="${rel#/}"
+    extract_dir="${tmpdir}/extract-$((embedded))"
+    mkdir -p "${extract_dir}"
+
+    echo "[generate-npm-sbom] embedding SPDX SBOM into ${rel}"
+    tar -xzf "${tgz}" -C "${extract_dir}"
+
+    pkg_dir="${extract_dir}/package"
+    pkg_json="${pkg_dir}/package.json"
+    if [[ ! -f "${pkg_json}" ]]; then
+        echo "[generate-npm-sbom] ERROR: ${rel} missing package/package.json" >&2
+        exit 1
+    fi
+
+    name="$(jq -r '.name // empty' "${pkg_json}")"
+    version="$(jq -r '.version // empty' "${pkg_json}")"
+    if [[ -z "${name}" || -z "${version}" ]]; then
+        echo "[generate-npm-sbom] ERROR: ${rel} package.json missing name/version" >&2
+        exit 1
+    fi
+
+    mkdir -p "${pkg_dir}/sboms"
+    sbom_path="${pkg_dir}/${SBOM_REL}"
+
+    # Scan the package tree (npm metadata + files). SPDX 2.3 JSON.
+    syft scan "dir:${pkg_dir}" \
+        -o "spdx-json=${sbom_path}" \
+        --quiet
+
+    [[ -s "${sbom_path}" ]] || {
+        echo "[generate-npm-sbom] ERROR: syft did not write ${SBOM_REL} for ${rel}" >&2
+        exit 1
+    }
+
+    # Ensure package.json files includes the SBOM path (npm pack / publish allowlist).
+    jq --arg sbom "${SBOM_REL}" '
+        .files = ((.files // []) + [$sbom] | unique | sort)
+    ' "${pkg_json}" > "${pkg_json}.next"
+    mv "${pkg_json}.next" "${pkg_json}"
+
+    # Repack in place (npm-style package/ root).
+    pack_root="$(mktemp -d "${tmpdir}/pack.XXXXXX")"
+    mkdir -p "${pack_root}/package"
+    cp -a "${pkg_dir}/." "${pack_root}/package/"
+    tar --create --gzip --file "${tgz}" --directory "${pack_root}" package
+
+    echo "[generate-npm-sbom] embedded ${SBOM_REL} in ${rel} (${name}@${version})"
+    embedded=$((embedded + 1))
+done
+
+echo "[generate-npm-sbom] embedded SPDX SBOM into ${embedded} tarball(s) via syft $(syft version 2>/dev/null | head -1 || true)"
