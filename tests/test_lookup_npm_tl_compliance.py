@@ -10,6 +10,7 @@ import os
 import sys
 import unittest
 import urllib.error
+import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "scripts", "lookup-npm-tl-compliance")
@@ -192,7 +193,105 @@ class LookupTests(unittest.TestCase):
         self.assertEqual(payload["compliance_level"], "L3")
 
 
-class SkipSidecarTests(unittest.TestCase):
+class AuthHeaderTests(unittest.TestCase):
+    ALLOWED = (
+        "https://packages.redhat.com/api/pulp-content/lightwell-stage/"
+        "javascript/validated/bluebird"
+    )
+
+    def _clear_auth_env(self):
+        for key in (
+            "SERVICE_ACCOUNT_USERNAME",
+            "SERVICE_ACCOUNT_PASSWORD",
+        ):
+            os.environ.pop(key, None)
+
+    def test_no_auth_without_env(self):
+        self._clear_auth_env()
+        self.assertIsNone(lookup._registry_auth_header(self.ALLOWED))
+
+    def test_service_account_env_allowlisted(self):
+        self._clear_auth_env()
+        os.environ["SERVICE_ACCOUNT_USERNAME"] = "reader"
+        os.environ["SERVICE_ACCOUNT_PASSWORD"] = "secret"
+        try:
+            header = lookup._registry_auth_header(self.ALLOWED)
+        finally:
+            self._clear_auth_env()
+        self.assertEqual(header, "Basic cmVhZGVyOnNlY3JldA==")
+
+    def test_username_password_aliases_ignored(self):
+        """Only SERVICE_ACCOUNT_* env vars are accepted."""
+        self._clear_auth_env()
+        os.environ["username"] = "u"
+        os.environ["password"] = "p"
+        try:
+            header = lookup._registry_auth_header(self.ALLOWED)
+        finally:
+            os.environ.pop("username", None)
+            os.environ.pop("password", None)
+            self._clear_auth_env()
+        self.assertIsNone(header)
+
+    def test_no_auth_for_non_allowlisted_host(self):
+        self._clear_auth_env()
+        os.environ["SERVICE_ACCOUNT_USERNAME"] = "reader"
+        os.environ["SERVICE_ACCOUNT_PASSWORD"] = "secret"
+        try:
+            header = lookup._registry_auth_header(
+                "https://evil.example/javascript/validated/bluebird"
+            )
+        finally:
+            self._clear_auth_env()
+        self.assertIsNone(header)
+
+    def test_no_auth_for_http(self):
+        self._clear_auth_env()
+        os.environ["SERVICE_ACCOUNT_USERNAME"] = "reader"
+        os.environ["SERVICE_ACCOUNT_PASSWORD"] = "secret"
+        try:
+            header = lookup._registry_auth_header(
+                "http://packages.redhat.com/api/pulp-content/lightwell-stage/javascript/validated/"
+            )
+        finally:
+            self._clear_auth_env()
+        self.assertIsNone(header)
+
+    def test_no_auth_for_public_tl_path(self):
+        """Public TL path is same host but outside lightwell prefixes — no auth."""
+        self._clear_auth_env()
+        os.environ["SERVICE_ACCOUNT_USERNAME"] = "reader"
+        os.environ["SERVICE_ACCOUNT_PASSWORD"] = "secret"
+        try:
+            header = lookup._registry_auth_header(
+                "https://packages.redhat.com/api/pulp-content/"
+                "public-trusted-libraries/javascript/bluebird"
+            )
+        finally:
+            self._clear_auth_env()
+        self.assertIsNone(header)
+
+    def test_url_allows_registry_auth(self):
+        self.assertTrue(lookup._url_allows_registry_auth(self.ALLOWED))
+        self.assertFalse(
+            lookup._url_allows_registry_auth("https://evil.example/pulp-content/x")
+        )
+
+    def test_redirects_are_disabled(self):
+        """urlopen must not follow redirects (avoids leaking Authorization off-host)."""
+        handler = lookup._NoRedirectHandler()
+        req = urllib.request.Request(self.ALLOWED)
+        with self.assertRaises(urllib.error.HTTPError) as ctx:
+            handler.redirect_request(
+                req,
+                None,
+                302,
+                "Found",
+                {},
+                "https://evil.example/steal",
+            )
+        self.assertEqual(ctx.exception.code, 302)
+        self.assertIn("redirect disabled", str(ctx.exception.reason))
     def test_skip_sidecar_returns_l3_without_fetch(self):
         old = os.environ.get("TL_SKIP_COMPLIANCE_SIDECAR")
         try:
