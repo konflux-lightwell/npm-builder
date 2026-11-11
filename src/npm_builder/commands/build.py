@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import logging
 
+from npm_builder.build import run_build
+
 logger = logging.getLogger(__name__)
 
 
@@ -14,8 +16,6 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 
 
 def run(args: argparse.Namespace) -> int:
-    from npm_builder import build
-
     logger.debug("Building package recipes: %s", args.package_dir)
-    build.run_build(args.package_dir, workdir=args.workdir)
+    run_build(args.package_dir, workdir=args.workdir)
     return 0

@@ -11,7 +11,7 @@ class TestRouting:
         captured = capsys.readouterr()
         assert "usage" in captured.err.lower()
 
-    @patch("npm_builder.build.run_build")
+    @patch("npm_builder.commands.build.run_build")
     def test_build_routes_to_run_build(self, run_build):
         assert main(["build", "pkg-a", "pkg-b"]) == 0
         run_build.assert_called_once_with(["pkg-a", "pkg-b"], workdir=None)
