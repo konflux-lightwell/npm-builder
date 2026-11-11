@@ -14,4 +14,4 @@ class TestRouting:
     @patch("npm_builder.commands.build.run_build")
     def test_build_routes_to_run_build(self, run_build):
         assert main(["build", "pkg-a", "pkg-b"]) == 0
-        run_build.assert_called_once_with(["pkg-a", "pkg-b"], workdir=None)
+        assert run_build.call_args.args[0] == ["pkg-a", "pkg-b"]

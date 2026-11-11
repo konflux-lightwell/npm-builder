@@ -26,6 +26,8 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# pytest skips "build" dirs by default, which would hide tests/build/.
+norecursedirs = [".*", "*.egg", "dist", "node_modules", "venv"]
 addopts = "--strict-markers --strict-config"
 
 [tool.coverage.run]
