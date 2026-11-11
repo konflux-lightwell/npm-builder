@@ -19,11 +19,16 @@ BASEIMAGE="${BASEIMAGE:?BASEIMAGE required — set in baseimage.lock or env}"
 read -r RUST_VERSION RUST_VR < <(
     "${CONTAINER_RUNTIME}" run --rm --platform "${PLATFORM}" "${BASEIMAGE}" bash -c '
         set -euo pipefail
-        dnf -y -q module install rust-toolset
+        dnf -y -q module install rust-toolset >&2
         # UBI rust-toolset RPMs use epoch (none); version-release is sufficient for dnf.
-        echo "$(rpm -q --qf "%\{VERSION\}" rust) $(rpm -q --qf "%\{VERSION\}-%\{RELEASE\}" rust)"
+        rpm -q --qf "%{VERSION} %{VERSION}-%{RELEASE}\n" rust
     '
 )
+
+if [[ -z "${RUST_VERSION:-}" || -z "${RUST_VR:-}" ]]; then
+    echo "error: failed to resolve rust-toolset version from ${BASEIMAGE}" >&2
+    exit 1
+fi
 
 cat > "${LOCK_FILE}" <<EOF
 # Single source of truth for pinned rust-toolset RPMs (UBI AppStream only).
