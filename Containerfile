@@ -32,6 +32,7 @@ RUN dnf -y module enable nodejs:20 && \
         python3 \
         python3-pip \
         python39 \
+        python3.12 \
         ca-certificates \
         tar \
         gzip \
@@ -85,8 +86,13 @@ RUN useradd -m -u 1001 -s /bin/bash builder
 FROM tools AS test
 COPY scripts /src/scripts
 COPY tests /src/tests
+COPY pyproject.toml /src/pyproject.toml
+COPY src /src/src
 RUN chmod +x /src/scripts/* /src/tests/*.sh \
     && /src/tests/run_tests.sh \
+    && python3.12 -m venv /tmp/venv \
+    && /tmp/venv/bin/pip install --no-cache-dir /src "pytest>=7.0" \
+    && cd /src && /tmp/venv/bin/pytest -p no:cacheprovider \
     && touch /tmp/npm-builder-tests-ok
 
 ##########################
@@ -100,6 +106,14 @@ COPY --chmod=755 scripts/shasum /usr/local/bin/shasum
 COPY --chmod=755 scripts/build-npm-package scripts/build-npm-packages scripts/collect-npm-artifacts scripts/collect-npm-package-outputs scripts/generate-npm-sbom scripts/verify-npm-sbom scripts/assess-npm-compliance scripts/lookup-npm-tl-compliance scripts/record-npm-packages-built scripts/npm-workdir-load.sh scripts/npm-publish-pulp scripts/select-builder-node /usr/local/bin/
 COPY --chmod=644 scripts/npm-workdir-env.sh scripts/lib/npm-sbom-identity.sh scripts/lib/npm-sbom-identity.jq /usr/local/lib/npm-builder/
 ENV NPM_BUILDER_LIB=/usr/local/lib/npm-builder
+
+# npm-builder Python CLI: isolated venv, entry point linked onto PATH.
+COPY pyproject.toml /tmp/npm-builder-src/pyproject.toml
+COPY src /tmp/npm-builder-src/src
+RUN python3.12 -m venv /opt/npm-builder \
+    && /opt/npm-builder/bin/pip install --no-cache-dir /tmp/npm-builder-src \
+    && ln -s /opt/npm-builder/bin/npm-builder /usr/local/bin/npm-builder \
+    && rm -rf /tmp/npm-builder-src
 
 # gcc-toolset + rust-toolset + llvm-toolset under /opt/rh/* — node-gyp uses CC/CXX.
 # GCC_TOOLSET must match gcc-toolset.lock (currently 14).

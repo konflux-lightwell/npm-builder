@@ -91,6 +91,7 @@ Local builds: `podman login registry.redhat.io` before `docker`/`podman` build.
 | ------ | ---- |
 | `build-npm-package` | Run entrypoint + smoke for one manifest |
 | `build-npm-packages` | Build multiple package dirs (Tekton `PACKAGES` args) |
+| `npm-builder build` | Python CLI: build multiple package dirs (`--workdir`, `--source-root`, `--git-auth-path`) |
 | `collect-npm-artifacts` | Stage `out/*.tgz` for OCI push / optional Pulp publish |
 | `generate-npm-sbom` | Syft → SPDX JSON embedded as `package/sboms/redhat.spdx.json`, then enrich DocumentRoot with npm `name` / `version` / `pkg:npm/…` purl from `package.json` |
 | `verify-npm-sbom` | Assess: require embedded `redhat.spdx.json` with SPDX-2 + npm name/version or purl matching `package.json` |
@@ -137,8 +138,9 @@ docker run --rm npm-builder syft version
 
 ## Tests
 
-Konflux / `docker build` runs `tests/run_tests.sh` in a Containerfile stage and
-will not produce the final image if they fail (same pattern as `utils/`).
+Konflux / `docker build` runs `tests/run_tests.sh` and the Python CLI's `pytest`
+suite in a Containerfile stage and will not produce the final image if they fail
+(same pattern as `utils/`).
 
 ```bash
 ./npm-builder/tests/run_tests.sh
