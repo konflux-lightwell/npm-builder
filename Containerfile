@@ -1,7 +1,7 @@
 # TL npm factory builder — linux-x64, glibc (UBI8), Node 20 (default) + Node 22 (side) + Go + Rust.
 # Used by Konflux build-npm-package tasks; onboarder recipes run via build-npm-package.
 # Keep ARG BASEIMAGE in sync with baseimage.lock.
-ARG BASEIMAGE=registry.access.redhat.com/ubi8/ubi@sha256:bd097b288df365aec7bad694c87036534ce94d1a4974c943f417f757f8eb2ac4
+ARG BASEIMAGE=registry.access.redhat.com/ubi8/ubi@sha256:31854d90b8a474b0253a2d4a1f71659097654d5992d6d8b811a679f4ff0084bc
 # Syft: Red Hat tech-preview image (SPDX SBOM; pin intentionally).
 ARG SYFT_IMAGE=registry.redhat.io/rh-syft-tech-preview/syft-rhel9:1.29.0-1756223792@sha256:15ed82f0b5311a570ccb8ea02135d9776c6d61e545c51b256b3fc5b5db20ba67
 
