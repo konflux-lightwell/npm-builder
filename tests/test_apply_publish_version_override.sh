@@ -63,6 +63,21 @@ else
     ok "novel stream fails"
 fi
 
+printf '%s\n' '{"name":"left-pad","stream":"validated"}' > "${manifest}"
+if run_override "1.2.3-lwci.0" scratch; then
+    bad "validated manifest without a version should fail"
+else
+    ok "validated manifest without a version fails"
+fi
+if run_override "validated-lwci.0" scratch; then
+    bad "override must not match the stream name when version is missing"
+else
+    ok "missing version is not parsed as the stream name"
+fi
+[[ ! -f "${tmp}/called" ]] \
+    && ok "missing version does not rewrite" \
+    || bad "missing version should stop before the rewrite script"
+
 printf '%s\n' '{"name":"left-pad","version":"1.2.3","stream":"validated"}' > "${manifest}"
 if run_override "1.2.3-lwci.0" release; then
     bad "release intent should fail"
