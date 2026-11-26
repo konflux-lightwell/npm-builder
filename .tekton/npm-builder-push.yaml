@@ -10,11 +10,11 @@ metadata:
     pipelinesascode.tekton.dev/on-cel-expression: event == "push" && target_branch
       == "main"
   labels:
-    appstudio.openshift.io/application: npm-builder
+    appstudio.openshift.io/application: tools
     appstudio.openshift.io/component: npm-builder
     pipelines.appstudio.openshift.io/type: build
   name: npm-builder-on-push
-  namespace: lightwell-javascript-tenant
+  namespace: lightwell-catalog-tenant
 spec:
   params:
   - name: git-url
@@ -22,7 +22,7 @@ spec:
   - name: revision
     value: '{{revision}}'
   - name: output-image
-    value: quay.io/redhat-user-workloads/lightwell-javascript-tenant/npm-builder/npm-builder:{{revision}}
+    value: quay.io/redhat-user-workloads/lightwell-catalog-tenant/tools/npm-builder:{{revision}}
   - name: dockerfile
     value: Containerfile
   pipelineSpec:
